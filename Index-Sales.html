@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Excel → Mapbox (Master-matched, Clustered)</title>
+
+  <!-- Mapbox GL JS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <script>
+    mapboxgl.accessToken = "pk.eyJ1Ijoiam92YW5rOTkiLCJhIjoiY21lOHgzZHIyMGE3eDJrb2Z4azFsemdvcCJ9.Lh3hbX5_F3tGAe_mf0SKFA";
+  </script>
+
+  <!-- XLSX for Excel/CSV parsing/export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <style>
+    :root { --bg:#0b0c10; --panel:#111318; --muted:#8c96a0; --text:#e8eaed; --accent:#4fc3f7; }
+    * { box-sizing:border-box; }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji";}
+    #app{display:grid;grid-template-rows:auto auto 1fr; height:100%; position:relative;}
+    header{padding:12px 16px;background:var(--panel);border-bottom:1px solid #22262e;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+    header h1{font-size:16px;font-weight:600;margin:0 8px 0 0;opacity:.9;}
+    .spacer{flex:1;}
+    .btn{appearance:none;border:1px solid #2a3036;background:#141820;color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer;font-weight:600;}
+    .btn:hover{border-color:#3b424a;}
+    .btn.accent{background:var(--accent);color:#071018;border-color:transparent;}
+    .btn.small{padding:6px 10px;font-size:12px;}
+    input[type="file"]{color:var(--muted);}
+    select{padding:8px;border-radius:10px;border:1px solid #2a3036;background:#0e1218;color:var(--text);}
+    #mapper,#statusBar{padding:10px 16px;background:#0f1116;border-bottom:1px solid #22262e;}
+    #mapper details{background:#0b0e14;border:1px solid #1e232b;border-radius:12px;padding:8px 12px;}
+    #mapper summary{cursor:pointer;font-weight:600;}
+    #mapper .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px;}
+    #mapper label{font-size:12px;color:var(--muted);display:block;margin:6px 0;}
+    #mapper.overlay{position:absolute;left:16px;right:16px;top:72px;z-index:1000;max-height:45vh;overflow:auto;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.4);}
+    #statusBar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+    #statusBar .pill{background:#10141b;border:1px solid #1f2630;padding:6px 10px;border-radius:999px;font-size:12px;color:#b7c1cc;}
+    #map{width:100%;height:100%;}
+    .iw{max-width:320px;}
+    .iw h3{margin:0 0 6px;font-size:16px;}
+    .tag{display:inline-block;background:#0f1520;border:1px solid #283243;padding:2px 8px;border-radius:999px;margin:2px 4px 2px 0;font-size:12px;}
+    .imgs{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;margin-top:6px;}
+    .imgs img{width:100%;border-radius:8px;border:1px solid #2a3036;}
+    /* File chips */
+    .chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .chip{display:inline-flex;align-items:center;gap:6px; padding:4px 10px;border-radius:999px; border:1px solid #2a3036;background:#0f1116;color:#b7c1cc; font-size:12px;line-height:1}
+    .chip.ok{border-color:#2d5a3a;background:#0f1a14;color:#bef3c7}
+    .chip .dot{width:8px;height:8px;border-radius:50%;background:#9aa4af}
+    .chip.ok .dot{background:#32d14d}
+    .chip .name{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    /* Small map overlay container (top-right) */
+    .map-overlay {position:absolute; top:12px; right:12px; z-index:20; background:#0f1116; border:1px solid #1f2630; border-radius:10px; padding:8px 10px; display:flex; gap:8px; align-items:center; box-shadow:0 8px 22px rgba(0,0,0,.35);}
+    .map-overlay label { font-size:12px; color:#9fb0bf; }
+    .map-overlay select {appearance:none; padding:6px 8px; border-radius:8px; border:1px solid #2a3036; background:#0e1218; color:#e8eaed; font-size:12px;}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Excel → Map</h1>
+
+      <!-- Master (locations-only) -->
+      <label class="btn small">
+        Load Master
+        <input type="file" id="masterInput" accept=".xlsx,.xls,.csv" hidden>
+      </label>
+
+      <!-- Orders -->
+      <label class="btn small">
+        Load Orders
+        <input type="file" id="ordersInput" accept=".xlsx,.xls,.csv" hidden>
+      </label>
+
+      <button class="btn" id="processBtn" disabled>Process Uploaded Files</button>
+      
+      <button class="btn" id="plotBtn" disabled>Plot Markers</button>
+
+      <select id="categoryFilter" class="btn small" disabled>
+        <option value="">All categories</option>
+      </select>
+      <button class="btn" id="clearMapBtn">Clear Map</button>
+      <button class="btn accent" id="exportBtn" disabled>Download Updated Excel</button>
+
+      <button class="btn small" id="downloadUnmatchedBtn" disabled>Download Unmatched</button>
+
+      <input type="file" id="cacheUpload" accept="application/json" hidden />
+      <button class="btn small" id="saveCacheBtn">Download Cache</button>
+      <button class="btn small" id="loadCacheBtn">Load Cache</button>
+
+      <button class="btn small" id="toggleMapperBtn">Hide Panel</button>
+      <div class="chips" id="fileChips">
+     <span class="chip" id="masterChip">
+     <span class="dot"></span><span class="label">Master:</span>
+     <span class="name">No file</span>
+     </span>
+     <span class="chip" id="ordersChip">
+    <span class="dot"></span><span class="label">Orders:</span>
+    <span class="name">No file</span>
+  </span>
+</div>
+
+    </header>
+
+    <section id="mapper" hidden>
+      <details open>
+        <summary>Orders Column Mapping</summary>
+        <div class="grid" id="mapperGrid"></div>
+        <small style="color:#9fb0bf">We guessed the columns — adjust if needed, then click <b>Process Uploaded Files</b>.</small>
+      </details>
+    </section>
+
+    <section id="statusBar">
+      <span class="pill" id="masterPill">Master: 0</span>
+      <span class="pill" id="rowsPill">Orders rows: 0</span>
+      <span class="pill" id="uniquePill">Unique addresses: 0</span>
+      <span class="pill" id="geocodeNeededPill">Missing coords: 0</span>
+      <span class="pill" id="cacheSizePill">Cache: 0</span>
+      <span class="pill" id="noticePill">Status: idle</span>
+    </section>
+
+    <div id="map"></div>
+
+  </div>
+
+<script>
+  // =========================
+  // Globals / State
+  // =========================
+  let map, mapReady = false;
+  const MB_SOURCE = 'deduped-points';
+  let clusterLayersAdded = false;
+
+  // Colors / Radius
+  const NEARBY_RADIUS_M = 500;       // 500 m froximity to "closing"
+  const COLOR_MASTER  = '#66c2ff';   // baseline (master-only)
+  const COLOR_ORDERS  = '#ff8a00';   // orders (non-closing)
+  const COLOR_CLOSING = '#32d14d';   // closing (green)
+
+  const geocodeCacheKey = 'masterCoordCache_v1'; // seeded coords only (no online geocoding)
+  let geocodeCache = JSON.parse(localStorage.getItem(geocodeCacheKey) || '{}');
+
+  let masterRows = [];            // raw master rows
+  let ordersRows = [];            // raw orders rows
+  let rowsWithLatLng = [];        // copy of orders with lat/lng filled
+  let uniqueByAddress = new Map();// deduped orders (keyed by normalized address)
+
+  const GROUP_COLOR_MAP = {
+    'Restaurants & Bars': '#f39c12',
+    'Retail': '#3498db',
+    'Venue': '#9b59b6',
+    'Other': '#95a5a6'
+  };
+  let activeGroups = [];
+
+  // --- Super-category (group) rules (edit to match your data) ---
+  const GROUP_RULES = [
+    { name: 'Restaurants & Bars',  match: ['restaurant','resturant','bar','pub','taproom','cafe','coffee','on-premise','horeca'] },
+    { name: 'Retail',              match: ['store','shop','lcbo','grocery','supermarket','market','bottle','tbs','off-premise'] },
+    { name: 'Venue',               match: ['venue','stadium','arena','hall','theatre','theater'] },
+    { name: 'Other',               match: ['*'] } // catch-all
+  ];
+
+  // normalize helpers
+  const norm = s => String(s||'').trim().toLowerCase();
+  const normCategory = s => norm(s);
+  const pickNum = v => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  function categoryToGroup(category){
+    const n = norm(category);
+    // try non-catch-all rules first
+    for (const rule of GROUP_RULES){
+      if ((rule.match || []).some(w => w !== '*' && n.includes(w))) return rule.name;
+    }
+    // fallback to catch-all
+    const ca = GROUP_RULES.find(r => (r.match || []).includes('*'));
+    return ca ? ca.name : 'Other';
+  }
+
+  // Master indexes for smart matching
+  const MULTI = Symbol('multi');
+  const masterByAddress = new Map();
+  const masterIdx = { full: new Map(), addrPostal: new Map(), addrCityProv: new Map(), postal: new Map() };
+
+  // =========================
+  // Mapbox UI Controls
+  // =========================
+  let groupFilterSel = null;
+  let productFilterSel = null; // disabled (picture/family logic removed)
+
+  class GroupControl {
+    onAdd(map) {
+      this._map = map;
+      const wrap = document.createElement('div');
+      wrap.className = 'mapboxgl-ctrl mapboxgl-ctrl-group';
+      wrap.style.padding = '4px';
+
+      const title = document.createElement('div');
+      title.textContent = 'Filters';
+      title.style.padding = '2px 4px';
+      title.style.fontSize = '12px';
+      title.style.color = '#9fb0bf';
+      title.style.fontWeight = '600';
+      wrap.appendChild(title);
+
+      // Group select
+      const gl = document.createElement('div');
+      gl.textContent = 'Group';
+      gl.style.fontSize = '11px';
+      gl.style.color = '#9fb0bf';
+      gl.style.margin = '4px';
+      wrap.appendChild(gl);
+
+      const gsel = document.createElement('select');
+      gsel.style.margin = '0 4px 6px';
+      gsel.disabled = true;
+      gsel.innerHTML = `<option value="">All groups</option>`;
+      gsel.addEventListener('change', () => applyMapFilters());
+      wrap.appendChild(gsel);
+      groupFilterSel = gsel;
+
+      // Product select (disabled)
+      const pl = document.createElement('div');
+      pl.textContent = 'Product';
+      pl.style.fontSize = '11px';
+      pl.style.color = '#9fb0bf';
+      pl.style.margin = '4px';
+      wrap.appendChild(pl);
+
+      const psel = document.createElement('select');
+      psel.style.margin = '0 4px 6px';
+      psel.innerHTML = `<option value="">All products</option>`;
+      psel.disabled = true;
+      wrap.appendChild(psel);
+      productFilterSel = psel;
+
+      return wrap;
+    }
+    onRemove(){ groupFilterSel = null; productFilterSel = null; this._map = undefined; }
+  }
+
+  class LegendControl {
+    onAdd(map){
+      this._map = map;
+      this._el = document.createElement('div');
+      this._el.className = 'mapboxgl-ctrl';
+      this._el.style.background = '#0f1116';
+      this._el.style.border = '1px solid #1f2630';
+      this._el.style.borderRadius = '8px';
+      this._el.innerHTML = colorLegendHTML();
+      return this._el;
+    }
+    onRemove(){ this._el.remove(); this._map = undefined; }
+    refresh(){ if (this._el) this._el.innerHTML = colorLegendHTML(); }
+  }
+  const legendCtrl = new LegendControl();
+
+  function colorLegendHTML(){
+    return `
+      <div style="padding:6px 8px;max-width:220px">
+        <div style="display:flex;align-items:center;gap:8px;margin:2px 0">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${COLOR_CLOSING};border:1px solid #0003"></span>
+          <span style="font-size:12px;color:#b7c1cc">Closing (Orders)</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin:2px 0">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${COLOR_ORDERS};border:1px solid #0003"></span>
+          <span style="font-size:12px;color:#b7c1cc">Orders (non-closing)</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin:2px 0">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${COLOR_MASTER};border:1px solid #0003"></span>
+          <span style="font-size:12px;color:#b7c1cc">Master (baseline)</span>
+        </div>
+      </div>`;
+  }
+
+  // =========================
+  // UI Refs
+  // =========================
+  const $ = s => document.querySelector(s);
+  const masterInput = $('#masterInput');
+  const ordersInput = $('#ordersInput');
+  const processBtn = $('#processBtn');
+  const plotBtn = $('#plotBtn');
+  const exportBtn = $('#exportBtn');
+  const clearMapBtn = $('#clearMapBtn');
+  const saveCacheBtn = $('#saveCacheBtn');
+  const loadCacheBtn = $('#loadCacheBtn');
+  const cacheUpload = $('#cacheUpload');
+  const toggleMapperBtn = $('#toggleMapperBtn');
+  const categoryFilter = $('#categoryFilter');
+
+  const mapperEl = $('#mapper');
+  const mapperGridEl = $('#mapperGrid');
+
+  const masterPill = $('#masterPill');
+  const rowsPill = $('#rowsPill');
+  const uniquePill = $('#uniquePill');
+  const geocodeNeededPill = $('#geocodeNeededPill');
+  const cacheSizePill = $('#cacheSizePill');
+  const noticePill = $('#noticePill');
+  const downloadUnmatchedBtn = $('#downloadUnmatchedBtn');
+
+  cacheSizePill.textContent = `Cache: ${Object.keys(geocodeCache).length}`;
+
+  // =========================
+  // Helpers (address keys)
+  // =========================
+  function canonProvince(s){
+    s = String(s||'').trim().toLowerCase().replace(/\./g,'');
+    const map = { 'ontario':'on', 'on':'on', 'quebec':'qc', 'qc':'qc', 'british columbia':'bc', 'bc':'bc', 'alberta':'ab', 'ab':'ab' };
+    return map[s] || s;
+  }
+  function canonPostalCA(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+  function canonStreet(s){
+    let x = String(s||'').toLowerCase().trim();
+    x = x.replace(/\b(unit|suite|ste|apt|apartment|#)\s*\w+\b/g,'');
+    x = x.replace(/\b(fl|floor)\s*\d+\b/g,'');
+    const reps = [
+      [/street\b|st\./g,'st'], [/road\b|rd\./g,'rd'], [/avenue\b|ave\./g,'ave'],
+      [/boulevard\b|blvd\./g,'blvd'], [/drive\b|dr\./g,'dr'], [/court\b|ct\./g,'ct'],
+      [/crescent\b|cres\./g,'cres'], [/trail\b|trl\./g,'trl'], [/highway\b|hwy\./g,'hwy'],
+      [/place\b|pl\./g,'pl'], [/terrace\b|terr\./g,'terr']
+    ];
+    reps.forEach(([re,to])=> x = x.replace(re,to));
+    x = x.replace(/[.,]/g,' ');
+    x = x.replace(/\s+/g,' ').trim();
+    return x;
+  }
+  function keyFull(addr, city, prov, postal){
+    return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov), canonPostalCA(postal)]
+      .filter(Boolean).join('|');
+  }
+  function keyAddrPostal(addr, postal){ return [canonStreet(addr), canonPostalCA(postal)].filter(Boolean).join('|'); }
+  function keyAddrCityProv(addr, city, prov){ return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov)]
+      .filter(Boolean).join('|'); }
+  function keyPostal(postal){ return canonPostalCA(postal); }
+  function normalizeAddressParts(address, city, province, postal){ return keyFull(address, city, province, postal); }
+
+  function setUnique(map, key, entry){
+    if (!key) return;
+    const ex = map.get(key);
+    if (!ex) map.set(key, entry);
+    else if (ex !== entry) map.set(key, MULTI);
+  }
+
+  // For feature de-dup/priority
+  function featureAddressKey(p){ return keyFull(p.address, p.city, p.province, p.postal); }
+  function featureRank(p){
+    if (p.isClosing) return 3;        // highest
+    if (p.src === 'orders') return 2; // middle
+    return 1;                         // master lowest
+  }
+
+  // =========================
+  // Mapbox init + clustering
+  // =========================
+  async function ensureMap(){
+    if (mapReady) return;
+    map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/streets-v12',
+      center: [-79.4, 43.7],
+      zoom: 9
+    });
+    map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    map.addControl(legendCtrl, 'bottom-left');
+
+    await new Promise(res => map.on('load', res));
+    map.addControl(new GroupControl(), 'top-left');
+    mapReady = true;
+  }
+
+  function addClusterLayers(){
+    if (clusterLayersAdded) return;
+
+    map.addLayer({
+      id: 'clusters',
+      type: 'circle',
+      source: MB_SOURCE,
+      filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': ['step', ['get', 'point_count'],
+          '#66c2ff', 50, '#1e90ff', 100, '#0b63b6'
+        ],
+        'circle-radius': ['step', ['get', 'point_count'],
+          14, 50, 18, 100, 22
+        ]
+      }
+    });
+
+    map.addLayer({
+      id: 'cluster-count',
+      type: 'symbol',
+      source: MB_SOURCE,
+      filter: ['has', 'point_count'],
+      layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 12 },
+      paint: { 'text-color': '#ffffff' }
+    });
+
+    map.addLayer({
+      id: 'unclustered',
+      type: 'circle',
+      source: MB_SOURCE,
+      filter: ['!', ['has', 'point_count']],
+      paint: {
+        'circle-color': '#4fc3f7',
+        'circle-radius': 6,
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#0b0e14'
+      }
+    });
+
+    map.on('click', 'unclustered', (e) => {
+      const f = e.features[0], p = f.properties;
+      let products = [];
+      try { products = JSON.parse(p.products || '[]'); } catch {}
+      const entry = {
+        name: p.name,
+        address: p.address, city: p.city, province: p.province, postal: p.postal,
+        products: new Set(products)
+      };
+      const node = buildInfoContent(entry);
+      new mapboxgl.Popup({ offset: 12 })
+        .setLngLat(f.geometry.coordinates)
+        .setHTML(typeof node === 'string' ? node : node.outerHTML)
+        .addTo(map);
+    });
+
+    const enter = () => map.getCanvas().style.cursor = 'pointer';
+    const leave = () => map.getCanvas().style.cursor = '';
+    map.on('mouseenter', 'clusters', enter);
+    map.on('mouseleave', 'clusters', leave);
+    map.on('mouseenter', 'unclustered', enter);
+    map.on('mouseleave', 'unclustered', leave);
+
+    clusterLayersAdded = true;
+  }
+
+  function updateUnclusteredColorPaint(){
+    if (!map || !map.getLayer('unclustered')) return;
+    // Priority: Closing (green) > Orders (orange) > Master (blue)
+    map.setPaintProperty('unclustered', 'circle-color',
+      ['case',
+        ['==', ['get','isClosing'], true], COLOR_CLOSING,
+        ['==', ['get','src'], 'orders'], COLOR_ORDERS,
+        COLOR_MASTER
+      ]
+    );
+  }
+
+  function clearMapMarkers(){
+    if (map && map.getSource(MB_SOURCE)) {
+      map.getSource(MB_SOURCE).setData({ type:'FeatureCollection', features: [] });
+    }
+    noticePill.textContent = 'Status: map cleared.';
+  }
+
+  // =========================
+  // Popup content (no images)
+  // =========================
+  function escapeHtml(str){
+    return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[s]));
+  }
+  function buildInfoContent(entry){
+    const div = document.createElement('div');
+    div.className = 'iw';
+    const addrLine = [entry.address, entry.city, entry.province, entry.postal].filter(Boolean).join(', ');
+    const prods = Array.from(new Set(entry.products ? [...entry.products] : []));
+
+    div.innerHTML = `
+      <h3>${escapeHtml(entry.name || addrLine)}</h3>
+      <div style="margin:4px 0 6px;">${escapeHtml(addrLine)}</div>
+      ${prods.length ? `<div style="margin-top:8px;font-weight:600;">Products:</div>` : ''}
+      ${prods.length ? `<div>${prods.map(p=>`<span class="tag">${escapeHtml(p)}</span>`).join('')}</div>` : ''}
+    `;
+    return div;
+  }
+
+  // =========================
+  // File reading helpers
+  // =========================
+  async function readAnyTableFile(file){
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.csv')){
+      const text = await file.text();
+      const wb = XLSX.read(text, { type:'string' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { defval: '' });
+    } else {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type:'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { defval: '' });
+    }
+  }
+
+  // File chips (little status pills in header)
+  const masterChip = document.getElementById('masterChip');
+  const ordersChip = document.getElementById('ordersChip');
+  function setChip(el, label, filename, rowCount, ok){
+    el.querySelector('.label').textContent = label + ':';
+    el.querySelector('.name').textContent = filename
+      ? `${filename}${Number.isFinite(rowCount) ? ` (${rowCount} rows)` : ''}`
+      : 'No file';
+    el.classList.toggle('ok', !!ok);
+  }
+  setChip(masterChip, 'Master', null, null, false);
+  setChip(ordersChip, 'Orders', null, null, false);
+
+  // =========================
+  // Master ingestion (no geocoding)
+  // =========================
+  function ingestMasterRows(rows){
+    masterByAddress.clear();
+    masterIdx.full.clear();
+    masterIdx.addrPostal.clear();
+    masterIdx.addrCityProv.clear();
+    masterIdx.postal.clear();
+
+    let added = 0, seeded = 0;
+
+    for (const r of rows){
+      const name    = String(r['Location'] ?? '').trim();
+      const address = String(r['Address'] ?? '').trim();
+      const city    = String(r['City/Town'] ?? '').trim();
+      const postal  = String(r['Postal code'] ?? '').trim();
+      const lat     = pickNum(r['Latitude']);
+      const lng     = pickNum(r['Longitude']);
+      if (!address) continue;
+
+      const province = 'ON'; // master = Ontario
+
+      const entry = { name: name || address, address, city, province, postal, category: '', lat, lng };
+
+      const kFull = keyFull(address, city, province, postal);
+      const kAP   = keyAddrPostal(address, postal);
+      const kACP  = keyAddrCityProv(address, city, province);
+      const kP    = keyPostal(postal);
+
+      masterByAddress.set(kFull, entry);
+      setUnique(masterIdx.full, kFull, entry);
+      setUnique(masterIdx.addrPostal, kAP, entry);
+      setUnique(masterIdx.addrCityProv, kACP, entry);
+      setUnique(masterIdx.postal, kP, entry);
+
+      // seed coord cache
+      if (lat != null && lng != null){
+        if (!geocodeCache[kFull]) seeded++;
+        geocodeCache[kFull] = { lat, lng, formatted: null, ts: Date.now() };
+        if (kAP && !geocodeCache[kAP]) geocodeCache[kAP] = { lat, lng, formatted: null, ts: Date.now() };
+      }
+      added++;
+    }
+
+    localStorage.setItem(geocodeCacheKey, JSON.stringify(geocodeCache));
+    cacheSizePill.textContent = `Cache: ${Object.keys(geocodeCache).length}`;
+    masterPill.textContent = `Master: ${added}`;
+    noticePill.textContent = `Status: loaded master (${added}).` + (seeded ? ` Seeded ${seeded} coords.` : '');
+  }
+
+  function findMaster(address, city, province, postal){
+    const k1 = keyFull(address, city, province, postal);
+    const k2 = keyAddrPostal(address, postal);
+    const k3 = keyAddrCityProv(address, city, province);
+    const k4 = keyPostal(postal);
+    if (masterIdx.full.has(k1))       { const v = masterIdx.full.get(k1);       if (v !== MULTI) return v; }
+    if (masterIdx.addrPostal.has(k2)) { const v = masterIdx.addrPostal.get(k2); if (v !== MULTI) return v; }
+    if (masterIdx.addrCityProv.has(k3)){const v = masterIdx.addrCityProv.get(k3);if (v !== MULTI) return v; }
+    if (masterIdx.postal.has(k4))     { const v = masterIdx.postal.get(k4);     if (v !== MULTI) return v; }
+    return null;
+  }
+
+  function cacheLookup(address, city, province, postal){
+    const k1 = keyFull(address, city, province, postal);
+    const k2 = keyAddrPostal(address, postal);
+    return geocodeCache[k1] || geocodeCache[k2] || null;
+  }
+
+  // =========================
+  // Orders mapping UI
+  // =========================
+  const columnMap = {
+    name: null, category: null, product: null,
+    address: null, city: null, province: null, postal: null,
+    lat: null, lng: null
+  };
+
+  function buildOrdersMapper(headers){
+    mapperGridEl.innerHTML = '';
+    const fields = [
+      ['name','Name (optional)'],
+      ['category','Category'],
+      ['product','Product/SKU'],
+      ['address','Street Address'],
+      ['city','City'],
+      ['province','Province/State'],
+      ['postal','Postal/ZIP'],
+      ['lat','Latitude (if present)'],
+      ['lng','Longitude (if present)']
+    ];
+    const guess = (key) => {
+      const find = (arr) => headers.find(h => arr.some(w => h.toLowerCase().includes(w)));
+      switch(key){
+        case 'name': return find(['name','account','store','location']);
+        case 'category': return find(['sub channel','subchannel','category','type']);
+        case 'product': return find(['product name','product','sku']);
+        case 'address': return find(['address']);
+        case 'city': return find(['city']);
+        case 'province': return find(['province','state']);
+        case 'postal': return find(['postal','zip']);
+        case 'lat': return find(['lat']);
+        case 'lng': return headers.find(h => /long(itude)?|lng/.test(h.toLowerCase()));
+      }
+    };
+    for (const [key,label] of fields){
+      const sel = document.createElement('select');
+      sel.dataset.key = key;
+      sel.innerHTML = `<option value="">-- none --</option>` + headers.map(h=>`<option value="${h}">${h}</option>`).join('');
+      const g = guess(key); if (g) sel.value = g;
+      columnMap[key] = sel.value || null;
+      sel.addEventListener('change', () => columnMap[key] = sel.value || null);
+
+      const wrap = document.createElement('div');
+      const lab = document.createElement('label');
+      lab.textContent = label;
+      wrap.appendChild(lab); wrap.appendChild(sel);
+      mapperGridEl.appendChild(wrap);
+    }
+  }
+
+  // =========================
+  // Event: Load Master
+  // =========================
+  masterInput.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    masterRows = await readAnyTableFile(f);
+    ingestMasterRows(masterRows);
+    setChip(masterChip, 'Master', f.name, masterRows.length, true);
+    processBtn.disabled = !ordersRows.length;
+  });
+
+  // =========================
+  // Event: Load Orders
+  // =========================
+  ordersInput.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    ordersRows = await readAnyTableFile(f);
+    rowsPill.textContent = `Orders rows: ${ordersRows.length}`;
+
+    setChip(ordersChip, 'Orders', f.name, ordersRows.length, true);
+
+    const headers = Object.keys(ordersRows[0] || {});
+    buildOrdersMapper(headers);
+    mapperEl.hidden = false;
+    mapperEl.classList.add('overlay');
+    placeOverlay();
+
+    processBtn.disabled = !masterRows.length; // require master first
+    noticePill.textContent = masterRows.length
+      ? 'Status: orders loaded. Map columns, then Process.'
+      : 'Status: load Master first, then Orders.';
+  });
+
+  function placeOverlay() {
+    const header = document.querySelector('header');
+    const status = document.querySelector('#statusBar');
+    const headerTop = header ? header.offsetTop : 0;
+    const headerH  = header ? header.offsetHeight : 0;
+    const statusH  = status ? status.offsetHeight : 0;
+    const top = headerTop + headerH + statusH + 8;
+    mapperEl.style.top = top + 'px';
+    mapperEl.style.maxHeight = `calc(100vh - ${top + 16}px)`;
+  }
+  window.addEventListener('resize', placeOverlay);
+
+  toggleMapperBtn.addEventListener('click', () => {
+    mapperEl.hidden = !mapperEl.hidden;
+    toggleMapperBtn.textContent = mapperEl.hidden ? 'Show Panel' : 'Hide Panel';
+    if (!mapperEl.hidden) placeOverlay();
+  });
+
+  // =========================
+  // Process (dedupe + master match)
+  // =========================
+  processBtn.addEventListener('click', async () => {
+    await ensureMap();
+    if (!ordersRows.length || !masterRows.length){
+      alert('Please load both Master and Orders files first.');
+      return;
+    }
+
+    const addrCol = columnMap.address; const prodCol = columnMap.product;
+    const catCol = columnMap.category; const nameCol = columnMap.name;
+    const cityCol = columnMap.city; const provCol = columnMap.province; const postCol = columnMap.postal;
+    const latCol = columnMap.lat; const lngCol = columnMap.lng;
+
+    if (!addrCol || !prodCol){
+      alert('Please select at least Address and Product columns for Orders.');
+      return;
+    }
+
+    uniqueByAddress.clear();
+    rowsWithLatLng = ordersRows.map(r => ({...r}));
+
+    for (const row of rowsWithLatLng){
+      let address  = String(row[addrCol]||'').trim();
+      if (!address) continue;
+      let city     = String(row[cityCol]||'').trim();
+      let province = String(row[provCol]||'').trim();
+      let postal   = String(row[postCol]||'').trim();
+
+      let lat = pickNum(row[latCol]);
+      let lng = pickNum(row[lngCol]);
+
+      const name     = String(row[nameCol]||'').trim();
+      const category = String(row[catCol]||'').trim();
+      const product  = String(row[prodCol]||'').trim();
+
+      // 1) Try master match for coords/address enrichment
+      const m = findMaster(address, city, province, postal);
+      if (m){
+        if (lat == null && Number.isFinite(m.lat)) lat = m.lat;
+        if (lng == null && Number.isFinite(m.lng)) lng = m.lng;
+        if (!address  && m.address)  address  = m.address;
+        if (!city     && m.city)     city     = m.city;
+        if (!province && m.province) province = m.province;
+        if (!postal   && m.postal)   postal   = m.postal;
+      } else {
+        // 2) Fallback to coord cache seeded by master
+        const c = cacheLookup(address, city, province, postal);
+        if (c){ lat = lat ?? c.lat; lng = lng ?? c.lng; }
+      }
+
+      const normKey = normalizeAddressParts(address, city, province, postal);
+      const group = categoryToGroup(category);
+      const isClosing = /\bclosing\b/i.test(String(category || '').trim());
+
+      if (!uniqueByAddress.has(normKey)){
+        uniqueByAddress.set(normKey, {
+          name: name || address,
+          category,
+          group,
+          address, city, province, postal,
+          lat: Number.isFinite(lat) ? lat : null,
+          lng: Number.isFinite(lng) ? lng : null,
+          products: new Set(product ? [product] : []),
+          src: 'orders',
+          isClosing
+        });
+      } else {
+        const e = uniqueByAddress.get(normKey);
+        if (!e.group && category) e.group = categoryToGroup(category);
+        if (product) e.products.add(product);
+        if (e.lat==null && Number.isFinite(lat)) e.lat = lat;
+        if (e.lng==null && Number.isFinite(lng)) e.lng = lng;
+        if (!e.category && category) e.category = category;
+        if (!e.name && name) e.name = name;
+        e.isClosing = e.isClosing || isClosing;
+        e.src = e.src || 'orders';
+      }
+    }
+
+    // UI updates
+    const need = [...uniqueByAddress.values()].filter(x => x.lat==null || x.lng==null).length;
+    rowsPill.textContent = `Orders rows: ${rowsWithLatLng.length}`;
+    uniquePill.textContent = `Unique addresses: ${uniqueByAddress.size}`;
+    geocodeNeededPill.textContent = `Missing coords: ${need}`;
+    plotBtn.disabled = uniqueByAddress.size === 0;
+    exportBtn.disabled = uniqueByAddress.size === 0;
+    downloadUnmatchedBtn.disabled = uniqueByAddress.size === 0;
+
+    // Group options
+    const groups = Array.from(new Set(
+      [...uniqueByAddress.values()].map(e => e.group || categoryToGroup(e.category))
+    )).sort();
+    activeGroups = groups.slice();
+    updateGroupOptions(groups);
+
+    // Category dropdown (from Orders)
+    const categories = Array.from(new Set(
+      [...uniqueByAddress.values()].map(e => normCategory(e.category)).filter(Boolean)
+    )).sort();
+    categoryFilter.innerHTML = `<option value="">All categories</option>` +
+      categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    categoryFilter.disabled = categories.length === 0;
+
+    if (legendCtrl && legendCtrl.refresh) legendCtrl.refresh();
+    updateUnclusteredColorPaint();
+
+    // collapse panel body
+    const det = document.querySelector('#mapper details');
+    if (det) det.open = false;
+
+    noticePill.textContent = 'Status: processed. You can plot now.';
+  });
+
+  // =========================
+  // Plot / Filter / Clear
+  // =========================
+  categoryFilter.addEventListener('change', applyMapFilters);
+  plotBtn.addEventListener('click', async () => {
+    await applyMapFilters();
+    mapperEl.hidden = true; toggleMapperBtn.textContent = 'Show Panel';
+  });
+  clearMapBtn.addEventListener('click', clearMapMarkers);
+
+  // =========================
+  // Export & Unmatched
+  // =========================
+  exportBtn.addEventListener('click', () => {
+    if (!ordersRows.length){ alert('No data to export. Load and process files first.'); return; }
+    const addrCol = columnMap.address; const cityCol = columnMap.city; const provCol = columnMap.province; const postCol = columnMap.postal;
+    const latColAlias = columnMap.lat || 'Latitude';
+    const lngColAlias = columnMap.lng || 'Longitude';
+
+    const updatedRows = ordersRows.map(r => {
+      const address = String(r[addrCol]||'').trim();
+      const city = String(r[cityCol]||'').trim();
+      const province = String(r[provCol]||'').trim();
+      const postal = String(r[postCol]||'').trim();
+      const key = normalizeAddressParts(address, city, province, postal);
+      const e = uniqueByAddress.get(key);
+      if (e && e.lat!=null && e.lng!=null){
+        return { ...r, [latColAlias]: e.lat, [lngColAlias]: e.lng };
+      }
+      return r;
+    });
+
+    const deduped = [...uniqueByAddress.values()].map(e => ({
+      Name: e.name, Category: e.category,
+      Address: e.address, City: e.city, Province: e.province, Postal: e.postal,
+      Latitude: e.lat, Longitude: e.lng,
+      Products: [...e.products].join(', ')
+    }));
+
+    const cacheRows = Object.entries(geocodeCache).map(([key, v]) => ({
+      key, lat: v.lat, lng: v.lng,
+      formatted: v.formatted ?? '',
+      tsISO: v.ts ? new Date(v.ts).toISOString() : ''
+    }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(updatedRows), 'Rows (updated)');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deduped), 'Locations (deduped)');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cacheRows), 'Coord Cache');
+    XLSX.writeFile(wb, 'updated_locations.xlsx');
+  });
+
+  downloadUnmatchedBtn.addEventListener('click', () => {
+    const rows = [];
+    for (const e of uniqueByAddress.values()){
+      if (e.lat == null || e.lng == null){
+        rows.push({
+          Name: e.name, Category: e.category, Address: e.address,
+          City: e.city, Province: e.province, Postal: e.postal
+        });
+      }
+    }
+    if (!rows.length){ alert('All entries have coordinates.'); return; }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Unmatched');
+    XLSX.writeFile(wb, 'unmatched_locations.xlsx');
+  });
+
+  // =========================
+  // Cache import/export
+  // =========================
+  saveCacheBtn.addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(geocodeCache, null, 2)], { type:'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'coordCache.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  loadCacheBtn.addEventListener('click', () => cacheUpload.click());
+  cacheUpload.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const text = await file.text();
+      const incoming = JSON.parse(text);
+      if (typeof incoming !== 'object' || Array.isArray(incoming)) throw new Error('Bad JSON');
+      let merged = 0;
+      for (const [k,v] of Object.entries(incoming)){
+        if (!geocodeCache[k]) { geocodeCache[k] = v; merged++; }
+      }
+      localStorage.setItem(geocodeCacheKey, JSON.stringify(geocodeCache));
+      cacheSizePill.textContent = `Cache: ${Object.keys(geocodeCache).length}`;
+      noticePill.textContent = `Status: loaded ${merged} new cache entries`;
+    } catch (err){
+      console.error(err);
+      noticePill.textContent = 'Status: failed to load cache';
+    } finally {
+      cacheUpload.value = '';
+    }
+  });
+
+  // =========================
+  // Unified: filter + (re)draw
+  // =========================
+  async function applyMapFilters(){
+    await ensureMap();
+    const selectedGroup = (groupFilterSel && groupFilterSel.value) || '';
+    const selectedCat   = (categoryFilter?.value) || '';
+
+    const orderFeatures = [];
+    const closingPoints = [];
+
+
+    // 1) Orders features (from uniqueByAddress)
+    for (const e of uniqueByAddress.values()){
+      if (e.lat == null || e.lng == null) continue;
+      if (selectedGroup && (e.group || categoryToGroup(e.category)) !== selectedGroup) continue;
+      if (selectedCat && normCategory(e.category) !== selectedCat) continue;
+
+      const props = {
+        name: e.name || e.address,
+        address: e.address || '',
+        city: e.city || '',
+        province: e.province || '',
+        postal: e.postal || '',
+        category: e.category || '',
+        group: (e.group || categoryToGroup(e.category || '')),
+        products: JSON.stringify(Array.from(e.products || [])),
+        src: 'orders',
+        isClosing: !!e.isClosing
+      };
+
+      const feat = {
+        type:'Feature',
+        geometry:{ type:'Point', coordinates:[e.lng, e.lat] },
+        properties: props
+      };
+      orderFeatures.push(feat);
+      if (props.isClosing) closingPoints.push(turf.point([e.lng, e.lat]));
+    }
+
+    // 2) Master features (baseline)
+    const masterFeatures = [];
+    for (const m of masterByAddress.values()){
+      const lat = Number(m.lat), lng = Number(m.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+      const props = {
+        name: m.name || m.address,
+        address: m.address || '',
+        city: m.city || '',
+        province: m.province || '',
+        postal: m.postal || '',
+        category: '',
+        group: 'Other',
+        products: '[]',
+        src: 'master',
+        isClosing: false
+      };
+      masterFeatures.push({
+        type:'Feature',
+        geometry:{ type:'Point', coordinates:[lng, lat] },
+        properties: props
+      });
+    }
+    console.log('[DEBUG] orderFeatures:', orderFeatures.length,
+            'closing flags in orders:', orderFeatures.filter(f => f.properties.isClosing).length,
+            'masterFeatures:', masterFeatures.length);
+
+
+    // 3) Priority-aware dedupe: Closing > Orders > Master
+    const byKey = new Map();
+    const candidates = [...masterFeatures, ...orderFeatures];
+    for (const f of candidates){
+      const k = featureAddressKey(f.properties);
+      const cur = byKey.get(k);
+      if (!cur || featureRank(f.properties) > featureRank(cur.properties)){
+        byKey.set(k, f);
+      }
+    }
+    let combined = [...byKey.values()].sort((a,b) => featureRank(a.properties) - featureRank(b.properties));
+
+// 4) Strict proximity filter around closing pins
+if (typeof turf !== 'undefined' && turf?.distance) {
+  if (closingPoints.length) {
+    const closingsFC = turf.featureCollection(closingPoints);
+    console.log('[DEBUG] closingPoints:', closingPoints.length);
+
+    combined = combined.filter(f => {
+      if (f.properties.isClosing) return true; // always show closing pins
+      const nearest = turf.nearestPoint(f, closingsFC);
+      const distKm = turf.distance(f, nearest, { units: 'kilometers' });
+      return (distKm * 1000) <= NEARBY_RADIUS_M; // within 500 m
+    });
+  } else {
+    // No closing pins detected -> show nothing and explain why in the status bar.
+    combined = [];
+    noticePill.textContent = 'Status: no closing rows detected in Orders — nothing to show with strict 500 m filter.';
+    console.warn('[DEBUG] No closing rows detected. Check Orders mapping and Category values.');
+  }
+}
+
+
+
+    // 5) Fit bounds & set source
+    const bounds = new mapboxgl.LngLatBounds();
+    let hasBounds = false;
+    for (const f of combined){
+      const [lng,lat] = f.geometry.coordinates;
+      bounds.extend([lng, lat]); hasBounds = true;
+    }
+
+    const fc = { type:'FeatureCollection', features: combined };
+    if (!map.getSource(MB_SOURCE)){
+      map.addSource(MB_SOURCE, { type:'geojson', data: fc, cluster:true, clusterMaxZoom:14, clusterRadius:50 });
+      addClusterLayers();
+      updateUnclusteredColorPaint();
+    } else {
+      map.getSource(MB_SOURCE).setData(fc);
+      updateUnclusteredColorPaint();
+    }
+    if (hasBounds){ try{ map.fitBounds(bounds, { padding:40, duration:0 }); } catch{} }
+
+    activeGroups = ['Master','Orders','Closing'];
+    legendCtrl.refresh?.();
+
+    const lbl = closingPoints.length
+      ? `near ${closingPoints.length} closing pin(s) within ${NEARBY_RADIUS_M}m`
+      : 'all locations';
+    noticePill.textContent = `Status: plotted ${combined.length} pin(s) (${lbl}).`;
+  }
+
+  // =========================
+  // Group options helper
+  // =========================
+  function updateGroupOptions(groups){
+    if (!groupFilterSel) return;
+    groupFilterSel.innerHTML = `<option value="">All groups</option>` +
+      groups.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
+    groupFilterSel.disabled = groups.length === 0;
+  }
+</script>
+
+</body>
+</html>
