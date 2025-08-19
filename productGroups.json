@@ -1,0 +1,15 @@
+[
+  { "group": "Naughty",      "match": ["Naughty Neighbour", "Nickel Brook Naughty Neighbour Pale Ale", "double ipa", "session ipa"] },
+  { "group": "Wicked Awesome",    "match": ["Wicked Awesome", "Nickel Brook Wicked Awesome New England Ipa", "pilsner", "helles"] },
+  { "group": "Lager",     "match": ["Nickel Brook Lager", "House Draft", "Nickel Brook Lager, 473ML 473C Can"] },
+  { "group": "Paloma",     "match": ["Paloma", "porter", "brown"] },
+  { "group": "Head Stock", "match": ["HeadStock", "Nickel Brook Head Stock West Coast-Style Ipa", "Nickel Brook Head Stock 6-Pack", "Head Stock"] },
+  { "group": "Jam Stand", "match": ["Jam Stand", "Jam Stand Raspberry With Vanilla and Hibiscus ", "Nickel Brook Jam Stand Rasp. Berliner Weisse", "Raspberry Jam Stand"] },
+  { "group": "Soccer Mom", "match": ["Nickel Brook Soccer Mom Wheat Beer", "limited", "special"] },
+  { "group": "Road Trip", "match": ["Road Trip To Auckland - New Zealand Style Ipa", "limited", "special"] },
+  { "group": "Mule", "match": ["seasonal", "limited", "special"] },
+  { "group": "Party Dad", "match": ["Nickel Brook Party Dad Ipa", "limited", "special"] },
+  { "group": "Vamonos", "match": ["Nickel Brook Vamonos Lime Lager", "Vamonos Lime Lager", "special"] },
+  { "group": "Cause & Effect", "match": ["Nickel Brook Cause & Effect", "Cause & Effect"]},
+  { "group": "Other",    "match": ["*"] }
+]  
