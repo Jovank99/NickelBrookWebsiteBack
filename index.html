@@ -1,1 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Excel → Mapbox (XLSX Orders + Master Merge, Chains & Subchannels)</title>
 
+  <!-- Mapbox GL JS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <script>
+    mapboxgl.accessToken = "pk.eyJ1Ijoiam92YW5rOTkiLCJhIjoiY21lOHgzZHIyMGE3eDJrb2Z4azFsemdvcCJ9.Lh3hbX5_F3tGAe_mf0SKFA";
+  </script>
+
+  <!-- SheetJS for XLSX; Papa Parse for CSV (kept for flexibility) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    :root { --bg:#0b0c10; --fg:#e8eaed; --card:#0f1116; --border:#1f2630; }
+    html,body { height:100%; }
+    body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #map { width:100%; height:100vh; }
+    .mapboxgl-ctrl-group { background:var(--card); border:1px solid var(--border); border-radius:10px; }
+    .legend { position: absolute; right: 12px; bottom: 12px; background: var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:12px; max-height:40vh; overflow:auto; }
+    .legend-row { display:flex; align-items:center; gap:8px; margin:4px 0; white-space:nowrap; }
+    .legend-swatch { width:12px; height:12px; border-radius:3px; border:1px solid #0b0e14; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="legend" class="legend"></div>
+
+  <script>
+    // ===============================
+    // Config — UPDATE these
+    // ===============================
+    const MASTER_URL   = "https://yourusername.github.io/mapbox-map/master.xlsx";  // or .csv / .json
+    const ORDERS_URL   = "https://yourusername.github.io/mapbox-map/orders.xlsx";  // or .csv / .json
+    const MASTER_SHEET = "";   // optional: exact sheet name; leave "" to use the first sheet
+    const ORDERS_SHEET = "";   // optional: exact sheet name; leave "" to use the first sheet
+
+    // Sub-channel whitelist
+    const SUBCHANNEL_WHITELIST = new Set(["LCBO", "LCBO Grocery", "TBS", "Retail Other"]);
+
+    // Colors by canonical chain
+    const GROUP_COLOR_MAP = {
+      "Naughty": "#e67e22",
+      "Wicked Awesome": "#1abc9c",
+      "Lager": "#3498db",
+      "Paloma": "#f1c40f",
+      "Head Stock": "#9b59b6",
+      "Jam Stand": "#e74c3c",
+      "Soccer Mom": "#2ecc71",
+      "Road Trip": "#16a085",
+      "Mule": "#d35400",
+      "Party Dad": "#2980b9",
+      "Vamonos": "#8e44ad",
+      "Cause & Effect": "#2c3e50",
+      "Other": "#95a5a6"
+    };
+
+    // Inline chain remapping rules (your requested format)
+    const PRODUCT_GROUPS = [
+      { "group": "Naughty",        "match": ["Naughty Neighbour", "Nickel Brook Naughty Neighbour Pale Ale", "double ipa", "session ipa"] },
+      { "group": "Wicked Awesome", "match": ["Wicked Awesome", "Nickel Brook Wicked Awesome New England Ipa", "pilsner", "helles"] },
+      { "group": "Lager",          "match": ["Nickel Brook Lager", "House Draft", "Nickel Brook Lager, 473ML 473C Can"] },
+      { "group": "Paloma",         "match": ["Paloma", "porter", "brown"] },
+      { "group": "Head Stock",     "match": ["HeadStock", "Nickel Brook west coast-Style Ipa", "Nickel Brook Head Stock 6-Pack", "Head Stock"] },
+      { "group": "Jam Stand",      "match": ["Jam Stand", "Jam Stand Raspberry Nickel Brook Jam Stand Rasp. Berliner Weisse", "Raspberry Jam Stand"] },
+      { "group": "Soccer Mom",     "match": ["Nickel Brook Soccer Mom Wheat Beer", "limited", "special"] },
+      { "group": "Road Trip",      "match": ["Road Trip To Auckland - New Zealand Style Ipa", "limited", "special"] },
+      { "group": "Mule",           "match": ["seasonal", "limited", "special"] },
+      { "group": "Party Dad",      "match": ["Nickel Brook Party Dad Ipa", "limited", "special"] },
+      { "group": "Vamonos",        "match": ["Nickel Brook Vamonos Lime Lager", "Vamonos Lime Lager", "special"] },
+      { "group": "Cause & Effect", "match": ["Nickel Brook Cause & Effect", "Cause & Effect"]},
+      { "group": "Other",          "match": ["*"] }
+    ];
+
+    // ===============================
+    // Utilities
+    // ===============================
+    const norm = s => String(s||"").trim().toLowerCase();
+    const looseNorm = s => norm(s).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+    const normPostal = s => String(s||"").toUpperCase().replace(/\s+/g, "");
+    function keyFor(address, city, postal){ return `${looseNorm(address)}|${looseNorm(city)}|${normPostal(postal)}`; }
+
+    function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+    function toLooseWordRegex(term){
+      const parts = String(term||"").trim().split(/\s+/).map(escapeRegExp);
+      if (!parts.length) return null;
+      return new RegExp(`\\b${parts.join("\\W+")}\\b`, "i");
+    }
+
+    // Normalize product group rules that may use group/match/etc.
+    function normalizeRules(raw){
+      const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.groups) ? raw.groups : []);
+      const out = [];
+      let i = 0;
+      for (const r of arr){
+        const canonical = r.canonical || r.mapTo || r.group || r.name || "Other";
+        const aliases  = (r.aliases  || r.exact    || []).filter(Boolean);
+        const contains = (r.contains || r.match    || r.keywords || []).filter(Boolean);
+        const regex    = (r.regex    || []).filter(Boolean);
+        const priority = Number.isFinite(r.priority) ? r.priority : (i+1);
+
+        out.push({
+          canonical,
+          priority,
+          aliases: new Set(aliases.map(looseNorm)),
+          containsRegex: contains
+            .filter(s => s !== "*")
+            .map(toLooseWordRegex)
+            .filter(Boolean),
+          regexObjs: regex.map(p => { try { return new RegExp(p, "i"); } catch { return null; } }).filter(Boolean),
+          hasWildcard: contains.includes("*")
+        });
+        i++;
+      }
+      out.sort((a,b) => a.priority - b.priority);
+      return out;
+    }
+
+    function buildClassifier(rules){
+      return function classify(text){
+        const hayOrig = String(text||"");
+        const hayNorm = looseNorm(hayOrig);
+        if (!hayNorm) return "Other";
+
+        for (const r of rules){
+          if (r.aliases.has(hayNorm)) return r.canonical;
+          if (r.hasWildcard) return r.canonical;
+          for (const re of r.regexObjs){ if (re.test(hayOrig)) return r.canonical; }
+          for (const re of r.containsRegex){ if (re.test(hayOrig)) return r.canonical; }
+        }
+        return "Other";
+      };
+    }
+
+    function buildColorExpression(){
+      const match = ["match", ["get", "category"]];
+      for (const [k,v] of Object.entries(GROUP_COLOR_MAP)) match.push(k, v);
+      match.push(GROUP_COLOR_MAP["Other"]);
+      return match;
+    }
+
+    // Sub-channel normalization + extraction
+    function canonicalSubchannel(raw){
+      const s = looseNorm(raw || "");
+      if (!s) return "Other";
+      const padded = ` ${s} `;
+      const has = t => padded.includes(` ${looseNorm(t)} `);
+      if (has("lcbo") && has("grocery")) return "LCBO Grocery";
+      if (has("lcbo")) return "LCBO";
+      if (has("tbs") || padded.includes(" beer store ") || padded.includes(" the beer store ")) return "TBS";
+      if (has("retail")) return "Retail Other";
+      return "Other";
+    }
+    function extractSubchannel(row){
+      return canonicalSubchannel(
+        row["Sub Channel"] || row["SubChannel"] || row["Sub-Channel"] ||
+        row["Customer Sub Channel"] || row["Subchannel"] || row["Sub Channel Name"] ||
+        row["Channel"] || row["Customer Channel"] || row["Customer Sub-Channel"]
+      );
+    }
+
+    // ===============================
+    // XLSX/CSV/JSON loader
+    // ===============================
+    async function loadTable(url, preferredSheetName=""){
+      if (/\.xlsx?(\?|$)/i.test(url)) {
+        const ab = await fetch(url, { cache: "no-store" })
+          .then(r => { if (!r.ok) throw new Error("Failed to load XLSX: " + url); return r.arrayBuffer(); });
+        const wb = XLSX.read(ab, { type: "array" });
+        const sheetName = preferredSheetName && wb.SheetNames.includes(preferredSheetName)
+          ? preferredSheetName
+          : wb.SheetNames[0];
+        const ws = wb.Sheets[sheetName];
+        // defval: "" ensures missing cells become empty strings (so our selectors don't get undefined)
+        const data = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+        return data;
+      } else if (/\.csv(\?|$)/i.test(url)) {
+        const text = await fetch(url, { cache: "no-store" })
+          .then(r => { if (!r.ok) throw new Error("Failed to load CSV: " + url); return r.text(); });
+        const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+        if (parsed.errors && parsed.errors.length) console.warn("CSV parse issues:", parsed.errors);
+        return parsed.data;
+      } else {
+        const resp = await fetch(url, { cache: "no-store" });
+        if (!resp.ok) throw new Error("Failed to load JSON: " + url);
+        return resp.json();
+      }
+    }
+
+    // ===============================
+    // Map + Data state
+    // ===============================
+    let map, mapReady = false;
+    const MB_SOURCE = "orders-points";
+    let clusterLayersAdded = false;
+
+    let masterRows = [];
+    let ordersRows = [];
+    let uniqueByAddress = new Map();
+    let GROUP_RULES = normalizeRules(PRODUCT_GROUPS);
+
+    async function ensureMap(){
+      if (mapReady) return;
+      map = new mapboxgl.Map({
+        container: "map",
+        style: "mapbox://styles/mapbox/streets-v12",
+        center: [-79.4, 43.7],
+        zoom: 9
+      });
+      map.addControl(new mapboxgl.NavigationControl(), "top-right");
+      await new Promise(res => map.on("load", res));
+      mapReady = true;
+    }
+
+    function addClusterLayers(){
+      if (clusterLayersAdded) return;
+      map.addLayer({
+        id: "clusters",
+        type: "circle",
+        source: MB_SOURCE,
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": ["step", ["get", "point_count"], "#66c2ff", 50, "#1e90ff", 100, "#0b63b6"],
+          "circle-radius": ["step", ["get", "point_count"], 14, 50, 18, 100, 22]
+        }
+      });
+      map.addLayer({
+        id: "cluster-count",
+        type: "symbol",
+        source: MB_SOURCE,
+        filter: ["has", "point_count"],
+        layout: { "text-field": ["get", "point_count_abbreviated"], "text-size": 12 },
+        paint: { "text-color": "#ffffff" }
+      });
+      map.addLayer({
+        id: "unclustered",
+        type: "circle",
+        source: MB_SOURCE,
+        filter: ["!", ["has", "point_count"]],
+        paint: {
+          "circle-color": buildColorExpression(),
+          "circle-radius": 6,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#0b0e14"
+        }
+      });
+
+      map.on("click", "unclustered", e => {
+        const p = e.features[0].properties;
+        new mapboxgl.Popup()
+          .setLngLat(e.features[0].geometry.coordinates)
+          .setHTML(`
+            <strong>${p.name}</strong><br/>
+            ${p.address}, ${p.city} ${p.postal}<br/>
+            Chain: ${p.category}<br/>
+            Sub-channel: ${p.sub_channel || "—"}
+          `)
+          .addTo(map);
+      });
+
+      clusterLayersAdded = true;
+    }
+
+    // Load data
+    async function loadMaster(){ masterRows = await loadTable(MASTER_URL, MASTER_SHEET); }
+    async function loadOrders(){ ordersRows = await loadTable(ORDERS_URL, ORDERS_SHEET); }
+
+    // Merge, filter, classify
+    function processData(){
+      uniqueByAddress.clear();
+
+      // Master lookup by address|city|postal (tolerant)
+      const masterMap = new Map();
+      for (const m of masterRows){
+        const k = keyFor(
+          m["Address"],
+          m["City"],
+          m["Postal code"] ?? m["Postal Code"] ?? m["Postal"] ?? ""
+        );
+        masterMap.set(k, {
+          lat: parseFloat(m["Latitude"]) || null,
+          lng: parseFloat(m["Longitude"]) || null
+        });
+      }
+
+      const classify = buildClassifier(GROUP_RULES);
+
+      for (const r of ordersRows){
+        // Sub-channel filter
+        const subChan = extractSubchannel(r);
+        if (!SUBCHANNEL_WHITELIST.has(subChan)) continue;
+
+        // Coordinates: prefer orders, fallback to master
+        let lat = parseFloat(r["Latitude"]) || null;
+        let lng = parseFloat(r["Longitude"]) || null;
+        const k = keyFor(r["Address"], r["City"], r["Postal"] ?? r["Postal Code"] ?? "");
+        if ((!lat || !lng) && masterMap.has(k)){
+          const m = masterMap.get(k);
+          lat = m.lat; lng = m.lng;
+        }
+        if (!lat || !lng) continue; // still missing? skip
+
+        // Build classification text across common columns
+        const classifyText = [
+          r["Product"], r["Product Name"], r["Item"], r["Family"], r["Category"], r["Chain"], r["Line"]
+        ].filter(Boolean).join(" ");
+
+        const chain = classify(classifyText);
+
+        const entry = {
+          name: r["Name"] || r["Account"] || r["Location"] || r["Address"],
+          category: chain,
+          sub_channel: subChan,
+          address: r["Address"] || "",
+          city: r["City"] || "",
+          province: r["Province"] || r["Prov"] || "ON",
+          postal: r["Postal"] || r["Postal Code"] || "",
+          lat, lng
+        };
+
+        // Deduplicate by address key (last one wins)
+        uniqueByAddress.set(k, entry);
+      }
+    }
+
+    function plotData(){
+      const features = [];
+      const bounds = new mapboxgl.LngLatBounds();
+
+      for (const e of uniqueByAddress.values()){
+        features.push({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [e.lng, e.lat] },
+          properties: {
+            name: e.name,
+            address: e.address,
+            city: e.city,
+            province: e.province,
+            postal: e.postal,
+            category: e.category,
+            sub_channel: e.sub_channel
+          }
+        });
+        bounds.extend([e.lng, e.lat]);
+      }
+
+      const fc = { type:"FeatureCollection", features };
+      if (!map.getSource(MB_SOURCE)){
+        map.addSource(MB_SOURCE, { type:"geojson", data: fc, cluster:true, clusterMaxZoom:14, clusterRadius:50 });
+        addClusterLayers();
+      } else {
+        map.getSource(MB_SOURCE).setData(fc);
+      }
+
+      if (features.length > 0){
+        map.fitBounds(bounds, { padding:40, duration:0 });
+      }
+    }
+
+    function renderLegend(){
+      const el = document.getElementById("legend");
+      el.innerHTML = "<strong>Chains</strong>";
+      for (const [name, color] of Object.entries(GROUP_COLOR_MAP)){
+        const row = document.createElement("div");
+        row.className = "legend-row";
+        row.innerHTML = `<span class="legend-swatch" style="background:${color}"></span>${name}`;
+        el.appendChild(row);
+      }
+    }
+
+    async function boot(){
+      await ensureMap();
+      await Promise.all([loadMaster(), loadOrders()]);
+      processData();
+      plotData();
+      renderLegend();
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot, { once: true });
+    } else {
+      boot();
+    }
+  </script>
+</body>
+</html>
