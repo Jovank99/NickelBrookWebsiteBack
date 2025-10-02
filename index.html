@@ -3,390 +3,206 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Excel → Mapbox (XLSX Orders + Master Merge, Chains & Subchannels)</title>
+  <title>Orders → Map (Auto-load, Uses Master for Coords)</title>
 
   <!-- Mapbox GL JS -->
   <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
   <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
   <script>
-    mapboxgl.accessToken = "pk.eyJ1IjoibWNvdGUxOTkwIiwiYSI6ImNtZm1sNncwdjAzMzAybG9qNWZmMTA3a2kifQ.BznEOmPXkbPxo1YQikMtjw";
+    mapboxgl.accessToken = "pk.eyJ1Ijoiam92YW5rOTkiLCJhIjoiY21lOHgzZHIyMGE3eDJrb2Z4azFsemdvcCJ9.Lh3hbX5_F3tGAe_mf0SKFA";
   </script>
 
-  <!-- SheetJS for XLSX; Papa Parse for CSV (kept for flexibility) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- XLSX for Excel parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
   <style>
-    :root { --bg:#0b0c10; --fg:#e8eaed; --card:#0f1116; --border:#1f2630; }
-    html,body { height:100%; }
-    body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    #map { width:100%; height:100vh; }
-    .mapboxgl-ctrl-group { background:var(--card); border:1px solid var(--border); border-radius:10px; }
-    .legend { position: absolute; right: 12px; bottom: 12px; background: var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:12px; max-height:40vh; overflow:auto; }
-    .legend-row { display:flex; align-items:center; gap:8px; margin:4px 0; white-space:nowrap; }
-    .legend-swatch { width:12px; height:12px; border-radius:3px; border:1px solid #0b0e14; }
+    :root { --bg:#0b0c10; --text:#e8eaed; }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+    #map{width:100%;height:100%;}
+    .iw{max-width:300px}
+    .iw h3{margin:0 0 6px;font-size:16px}
   </style>
 </head>
 <body>
   <div id="map"></div>
-  <div id="legend" class="legend"></div>
 
   <script>
-    // ===============================
-    // Config — UPDATE these
-    // ===============================
-    const MASTER_URL   = "https://yourusername.github.io/mapbox-map/master.xlsx";  // or .csv / .json
-    const ORDERS_URL   = "https://yourusername.github.io/mapbox-map/orders.xlsx";  // or .csv / .json
-    const MASTER_SHEET = "";   // optional: exact sheet name; leave "" to use the first sheet
-    const ORDERS_SHEET = "";   // optional: exact sheet name; leave "" to use the first sheet
+    // =========================
+    // Config: two bundled files
+    // =========================
+    const MASTER_URL = 'master.xlsx';  // place next to this HTML
+    const ORDERS_URL = 'orders.xlsx';  // place next to this HTML
 
-    // Sub-channel whitelist
-    const SUBCHANNEL_WHITELIST = new Set(["LCBO", "LCBO Grocery", "TBS", "Retail Other"]);
+    // =========================
+    // Minimal helpers / normalization
+    // =========================
+    const pickNum = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
 
-    // Colors by canonical chain
-    const GROUP_COLOR_MAP = {
-      "Naughty": "#e67e22",
-      "Wicked Awesome": "#1abc9c",
-      "Lager": "#3498db",
-      "Paloma": "#f1c40f",
-      "Head Stock": "#9b59b6",
-      "Jam Stand": "#e74c3c",
-      "Soccer Mom": "#2ecc71",
-      "Road Trip": "#16a085",
-      "Mule": "#d35400",
-      "Party Dad": "#2980b9",
-      "Vamonos": "#8e44ad",
-      "Cause & Effect": "#2c3e50",
-      "Other": "#95a5a6"
-    };
-
-    // Inline chain remapping rules (your requested format)
-    const PRODUCT_GROUPS = [
-      { "group": "Naughty",        "match": ["Naughty Neighbour", "Nickel Brook Naughty Neighbour Pale Ale", "double ipa", "session ipa"] },
-      { "group": "Wicked Awesome", "match": ["Wicked Awesome", "Nickel Brook Wicked Awesome New England Ipa", "pilsner", "helles"] },
-      { "group": "Lager",          "match": ["Nickel Brook Lager", "House Draft", "Nickel Brook Lager, 473ML 473C Can"] },
-      { "group": "Paloma",         "match": ["Paloma", "porter", "brown"] },
-      { "group": "Head Stock",     "match": ["HeadStock", "Nickel Brook west coast-Style Ipa", "Nickel Brook Head Stock 6-Pack", "Head Stock"] },
-      { "group": "Jam Stand",      "match": ["Jam Stand", "Jam Stand Raspberry Nickel Brook Jam Stand Rasp. Berliner Weisse", "Raspberry Jam Stand"] },
-      { "group": "Soccer Mom",     "match": ["Nickel Brook Soccer Mom Wheat Beer", "limited", "special"] },
-      { "group": "Road Trip",      "match": ["Road Trip To Auckland - New Zealand Style Ipa", "limited", "special"] },
-      { "group": "Mule",           "match": ["seasonal", "limited", "special"] },
-      { "group": "Party Dad",      "match": ["Nickel Brook Party Dad Ipa", "limited", "special"] },
-      { "group": "Vamonos",        "match": ["Nickel Brook Vamonos Lime Lager", "Vamonos Lime Lager", "special"] },
-      { "group": "Cause & Effect", "match": ["Nickel Brook Cause & Effect", "Cause & Effect"]},
-      { "group": "Other",          "match": ["*"] }
-    ];
-
-    // ===============================
-    // Utilities
-    // ===============================
-    const norm = s => String(s||"").trim().toLowerCase();
-    const looseNorm = s => norm(s).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
-    const normPostal = s => String(s||"").toUpperCase().replace(/\s+/g, "");
-    function keyFor(address, city, postal){ return `${looseNorm(address)}|${looseNorm(city)}|${normPostal(postal)}`; }
-
-    function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-    function toLooseWordRegex(term){
-      const parts = String(term||"").trim().split(/\s+/).map(escapeRegExp);
-      if (!parts.length) return null;
-      return new RegExp(`\\b${parts.join("\\W+")}\\b`, "i");
+    async function readFirstSheet(url){
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const wb = XLSX.read(buf, { type:'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { defval: '' });
     }
 
-    // Normalize product group rules that may use group/match/etc.
-    function normalizeRules(raw){
-      const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.groups) ? raw.groups : []);
-      const out = [];
-      let i = 0;
-      for (const r of arr){
-        const canonical = r.canonical || r.mapTo || r.group || r.name || "Other";
-        const aliases  = (r.aliases  || r.exact    || []).filter(Boolean);
-        const contains = (r.contains || r.match    || r.keywords || []).filter(Boolean);
-        const regex    = (r.regex    || []).filter(Boolean);
-        const priority = Number.isFinite(r.priority) ? r.priority : (i+1);
-
-        out.push({
-          canonical,
-          priority,
-          aliases: new Set(aliases.map(looseNorm)),
-          containsRegex: contains
-            .filter(s => s !== "*")
-            .map(toLooseWordRegex)
-            .filter(Boolean),
-          regexObjs: regex.map(p => { try { return new RegExp(p, "i"); } catch { return null; } }).filter(Boolean),
-          hasWildcard: contains.includes("*")
-        });
-        i++;
-      }
-      out.sort((a,b) => a.priority - b.priority);
-      return out;
-    }
-
-    function buildClassifier(rules){
-      return function classify(text){
-        const hayOrig = String(text||"");
-        const hayNorm = looseNorm(hayOrig);
-        if (!hayNorm) return "Other";
-
-        for (const r of rules){
-          if (r.aliases.has(hayNorm)) return r.canonical;
-          if (r.hasWildcard) return r.canonical;
-          for (const re of r.regexObjs){ if (re.test(hayOrig)) return r.canonical; }
-          for (const re of r.containsRegex){ if (re.test(hayOrig)) return r.canonical; }
-        }
-        return "Other";
+    function guessHeaders(headers){
+      const H = headers.map(h => String(h||'').toLowerCase());
+      const find = (...needles) => headers.find((h,i)=> needles.some(n => H[i].includes(n)) ) || null;
+      return {
+        name:     find('name','account','store','location'),
+        address:  find('address','street'),
+        city:     find('city','town'),
+        province: find('province','state','prov'),
+        postal:   find('postal','zip','postcode'),
+        lat:      find('lat','latitude'),
+        lng:      headers.find((h,i)=> /long(itude)?|\blng\b/.test(H[i])) || null,
       };
     }
 
-    function buildColorExpression(){
-      const match = ["match", ["get", "category"]];
-      for (const [k,v] of Object.entries(GROUP_COLOR_MAP)) match.push(k, v);
-      match.push(GROUP_COLOR_MAP["Other"]);
-      return match;
+    function escapeHtml(str){
+      return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[s]));
     }
 
-    // Sub-channel normalization + extraction
-    function canonicalSubchannel(raw){
-      const s = looseNorm(raw || "");
-      if (!s) return "Other";
-      const padded = ` ${s} `;
-      const has = t => padded.includes(` ${looseNorm(t)} `);
-      if (has("lcbo") && has("grocery")) return "LCBO Grocery";
-      if (has("lcbo")) return "LCBO";
-      if (has("tbs") || padded.includes(" beer store ") || padded.includes(" the beer store ")) return "TBS";
-      if (has("retail")) return "Retail Other";
-      return "Other";
-    }
-    function extractSubchannel(row){
-      return canonicalSubchannel(
-        row["Sub Channel"] || row["SubChannel"] || row["Sub-Channel"] ||
-        row["Customer Sub Channel"] || row["Subchannel"] || row["Sub Channel Name"] ||
-        row["Channel"] || row["Customer Channel"] || row["Customer Sub-Channel"]
-      );
-    }
+    // Address canonicalization + keys (same strategy as your full app)
+    function canonProvince(s){ s = String(s||'').trim().toLowerCase().replace(/\./g,''); const map = { 'ontario':'on', 'on':'on', 'quebec':'qc', 'qc':'qc', 'british columbia':'bc', 'bc':'bc', 'alberta':'ab', 'ab':'ab' }; return map[s] || s; }
+    function canonPostalCA(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+    function canonStreet(s){ let x = String(s||'').toLowerCase().trim(); x = x.replace(/\b(unit|suite|ste|apt|apartment|#)\s*\w+\b/g,''); x = x.replace(/\b(fl|floor)\s*\d+\b/g,''); const reps = [[/street\b|st\./g,'st'], [/road\b|rd\./g,'rd'], [/avenue\b|ave\./g,'ave'], [/boulevard\b|blvd\./g,'blvd'], [/drive\b|dr\./g,'dr'], [/court\b|ct\./g,'ct'], [/crescent\b|cres\./g,'cres'], [/trail\b|trl\./g,'trl'], [/highway\b|hwy\./g,'hwy'], [/place\b|pl\./g,'pl'], [/terrace\b|terr\./g,'terr']]; reps.forEach(([re,to])=> x = x.replace(re,to)); x = x.replace(/[.,]/g,' '); x = x.replace(/\s+/g,' ').trim(); return x; }
+    function keyFull(addr, city, prov, postal){ return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov), canonPostalCA(postal)].filter(Boolean).join('|'); }
+    function keyAddrPostal(addr, postal){ return [canonStreet(addr), canonPostalCA(postal)].filter(Boolean).join('|'); }
+    function keyAddrCityProv(addr, city, prov){ return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov)].filter(Boolean).join('|'); }
+    function keyPostal(postal){ return canonPostalCA(postal); }
 
-    // ===============================
-    // XLSX/CSV/JSON loader
-    // ===============================
-    async function loadTable(url, preferredSheetName=""){
-      if (/\.xlsx?(\?|$)/i.test(url)) {
-        const ab = await fetch(url, { cache: "no-store" })
-          .then(r => { if (!r.ok) throw new Error("Failed to load XLSX: " + url); return r.arrayBuffer(); });
-        const wb = XLSX.read(ab, { type: "array" });
-        const sheetName = preferredSheetName && wb.SheetNames.includes(preferredSheetName)
-          ? preferredSheetName
-          : wb.SheetNames[0];
-        const ws = wb.Sheets[sheetName];
-        // defval: "" ensures missing cells become empty strings (so our selectors don't get undefined)
-        const data = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
-        return data;
-      } else if (/\.csv(\?|$)/i.test(url)) {
-        const text = await fetch(url, { cache: "no-store" })
-          .then(r => { if (!r.ok) throw new Error("Failed to load CSV: " + url); return r.text(); });
-        const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
-        if (parsed.errors && parsed.errors.length) console.warn("CSV parse issues:", parsed.errors);
-        return parsed.data;
-      } else {
-        const resp = await fetch(url, { cache: "no-store" });
-        if (!resp.ok) throw new Error("Failed to load JSON: " + url);
-        return resp.json();
+    // =========================
+    // Master index (unique-only hits)
+    // =========================
+    const MULTI = Symbol('multi');
+    const masterIdx = { full:new Map(), addrPostal:new Map(), addrCityProv:new Map(), postal:new Map() };
+
+    function setUnique(map, key, entry){ if (!key) return; const ex = map.get(key); if (!ex) map.set(key, entry); else if (ex !== entry) map.set(key, MULTI); }
+
+    function ingestMasterRows(rows){
+      masterIdx.full.clear(); masterIdx.addrPostal.clear(); masterIdx.addrCityProv.clear(); masterIdx.postal.clear();
+      for (const r of rows){
+        const name    = String(r['Location'] ?? '').trim();
+        const address = String(r['Address'] ?? '').trim();
+        const city    = String(r['City/Town'] ?? '').trim();
+        const postal  = String(r['Postal code'] ?? '').trim();
+        const lat     = pickNum(r['Latitude']);
+        const lng     = pickNum(r['Longitude']);
+        if (!address) continue;
+        const province = 'ON';
+        const entry = { name: name || address, address, city, province, postal, lat, lng };
+        const kFull = keyFull(address, city, province, postal);
+        const kAP   = keyAddrPostal(address, postal);
+        const kACP  = keyAddrCityProv(address, city, province);
+        const kP    = keyPostal(postal);
+        setUnique(masterIdx.full, kFull, entry);
+        setUnique(masterIdx.addrPostal, kAP, entry);
+        setUnique(masterIdx.addrCityProv, kACP, entry);
+        setUnique(masterIdx.postal, kP, entry);
       }
     }
 
-    // ===============================
-    // Map + Data state
-    // ===============================
-    let map, mapReady = false;
-    const MB_SOURCE = "orders-points";
-    let clusterLayersAdded = false;
-
-    let masterRows = [];
-    let ordersRows = [];
-    let uniqueByAddress = new Map();
-    let GROUP_RULES = normalizeRules(PRODUCT_GROUPS);
-
-    async function ensureMap(){
-      if (mapReady) return;
-      map = new mapboxgl.Map({
-        container: "map",
-        style: "mapbox://styles/mapbox/streets-v12",
-        center: [-79.4, 43.7],
-        zoom: 9
-      });
-      map.addControl(new mapboxgl.NavigationControl(), "top-right");
-      await new Promise(res => map.on("load", res));
-      mapReady = true;
+    function findMaster(address, city, province, postal){
+      const k1 = keyFull(address, city, province, postal);
+      const k2 = keyAddrPostal(address, postal);
+      const k3 = keyAddrCityProv(address, city, province);
+      const k4 = keyPostal(postal);
+      if (masterIdx.full.has(k1)) { const v = masterIdx.full.get(k1); if (v !== MULTI) return v; }
+      if (masterIdx.addrPostal.has(k2)) { const v = masterIdx.addrPostal.get(k2); if (v !== MULTI) return v; }
+      if (masterIdx.addrCityProv.has(k3)) { const v = masterIdx.addrCityProv.get(k3); if (v !== MULTI) return v; }
+      if (masterIdx.postal.has(k4)) { const v = masterIdx.postal.get(k4); if (v !== MULTI) return v; }
+      return null;
     }
 
-    function addClusterLayers(){
-      if (clusterLayersAdded) return;
-      map.addLayer({
-        id: "clusters",
-        type: "circle",
-        source: MB_SOURCE,
-        filter: ["has", "point_count"],
-        paint: {
-          "circle-color": ["step", ["get", "point_count"], "#66c2ff", 50, "#1e90ff", 100, "#0b63b6"],
-          "circle-radius": ["step", ["get", "point_count"], 14, 50, 18, 100, 22]
-        }
-      });
-      map.addLayer({
-        id: "cluster-count",
-        type: "symbol",
-        source: MB_SOURCE,
-        filter: ["has", "point_count"],
-        layout: { "text-field": ["get", "point_count_abbreviated"], "text-size": 12 },
-        paint: { "text-color": "#ffffff" }
-      });
-      map.addLayer({
-        id: "unclustered",
-        type: "circle",
-        source: MB_SOURCE,
-        filter: ["!", ["has", "point_count"]],
-        paint: {
-          "circle-color": buildColorExpression(),
-          "circle-radius": 6,
-          "circle-stroke-width": 1,
-          "circle-stroke-color": "#0b0e14"
-        }
-      });
+    // =========================
+    // Map init (pins only from Orders, enriched by Master)
+    // =========================
+    const MB_SOURCE = 'orders-pins';
+    let map;
 
-      map.on("click", "unclustered", e => {
+    async function init(){
+      // 1) Map
+      map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center:[-79.4,43.7], zoom:8 });
+      map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      await new Promise(res => map.on('load', res));
+
+      // 2) Load both files
+      const [masterRows, orderRows] = await Promise.all([
+        readFirstSheet(MASTER_URL),
+        readFirstSheet(ORDERS_URL)
+      ]);
+      ingestMasterRows(masterRows);
+
+      if (!orderRows.length) return;
+      const headers = Object.keys(orderRows[0]);
+      const cols = guessHeaders(headers);
+
+      const feats = [];
+      const bounds = new mapboxgl.LngLatBounds();
+      let hasBounds = false;
+
+      for (const r of orderRows){
+        let lat = pickNum(r[cols.lat]);
+        let lng = pickNum(r[cols.lng]);
+
+        let address  = String(r[cols.address]||'').trim();
+        let city     = String(r[cols.city]||'').trim();
+        let province = String(r[cols.province]||'').trim();
+        let postal   = String(r[cols.postal]||'').trim();
+
+        // Fill from Master if missing lat/lng (and optionally address parts)
+        if (lat==null || lng==null){
+          const m = findMaster(address, city, province, postal);
+          if (m){
+            if (lat==null && Number.isFinite(m.lat)) lat = m.lat;
+            if (lng==null && Number.isFinite(m.lng)) lng = m.lng;
+            if (!address && m.address) address = m.address;
+            if (!city && m.city) city = m.city;
+            if (!province && m.province) province = m.province;
+            if (!postal && m.postal) postal = m.postal;
+          }
+        }
+
+        if (lat==null || lng==null) continue; // still no coords → skip pin
+
+        const name = String(r[cols.name]||'').trim();
+        feats.push({ type:'Feature', geometry:{ type:'Point', coordinates:[lng,lat] }, properties:{ name, address, city, province, postal } });
+        bounds.extend([lng,lat]); hasBounds = true;
+      }
+
+      const fc = { type:'FeatureCollection', features: feats };
+      map.addSource(MB_SOURCE, { type:'geojson', data: fc });
+
+      map.addLayer({ id:'orders-points', type:'circle', source:MB_SOURCE, paint:{ 'circle-color':'#4fc3f7', 'circle-radius':6, 'circle-stroke-width':1, 'circle-stroke-color':'#0b0e14' } });
+
+      map.on('click', 'orders-points', (e) => {
         const p = e.features[0].properties;
-        new mapboxgl.Popup()
+        const addr = [p.address, p.city, p.province, p.postal].filter(Boolean).join(', ');
+        const html = `
+          <div class="iw">
+            <h3>${escapeHtml(p.name || addr || 'Location')}</h3>
+            ${addr ? `<div>${escapeHtml(addr)}</div>` : ''}
+          </div>`;
+        new mapboxgl.Popup({ offset: 12 })
           .setLngLat(e.features[0].geometry.coordinates)
-          .setHTML(`
-            <strong>${p.name}</strong><br/>
-            ${p.address}, ${p.city} ${p.postal}<br/>
-            Chain: ${p.category}<br/>
-            Sub-channel: ${p.sub_channel || "—"}
-          `)
+          .setHTML(html)
           .addTo(map);
       });
 
-      clusterLayersAdded = true;
+      map.on('mouseenter', 'orders-points', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'orders-points', () => map.getCanvas().style.cursor = '');
+
+      if (hasBounds) { try { map.fitBounds(bounds, { padding: 40, duration: 0 }); } catch {} }
     }
 
-    // Load data
-    async function loadMaster(){ masterRows = await loadTable(MASTER_URL, MASTER_SHEET); }
-    async function loadOrders(){ ordersRows = await loadTable(ORDERS_URL, ORDERS_SHEET); }
-
-    // Merge, filter, classify
-    function processData(){
-      uniqueByAddress.clear();
-
-      // Master lookup by address|city|postal (tolerant)
-      const masterMap = new Map();
-      for (const m of masterRows){
-        const k = keyFor(
-          m["Address"],
-          m["City"],
-          m["Postal code"] ?? m["Postal Code"] ?? m["Postal"] ?? ""
-        );
-        masterMap.set(k, {
-          lat: parseFloat(m["Latitude"]) || null,
-          lng: parseFloat(m["Longitude"]) || null
-        });
-      }
-
-      const classify = buildClassifier(GROUP_RULES);
-
-      for (const r of ordersRows){
-        // Sub-channel filter
-        const subChan = extractSubchannel(r);
-        if (!SUBCHANNEL_WHITELIST.has(subChan)) continue;
-
-        // Coordinates: prefer orders, fallback to master
-        let lat = parseFloat(r["Latitude"]) || null;
-        let lng = parseFloat(r["Longitude"]) || null;
-        const k = keyFor(r["Address"], r["City"], r["Postal"] ?? r["Postal Code"] ?? "");
-        if ((!lat || !lng) && masterMap.has(k)){
-          const m = masterMap.get(k);
-          lat = m.lat; lng = m.lng;
-        }
-        if (!lat || !lng) continue; // still missing? skip
-
-        // Build classification text across common columns
-        const classifyText = [
-          r["Product"], r["Product Name"], r["Item"], r["Family"], r["Category"], r["Chain"], r["Line"]
-        ].filter(Boolean).join(" ");
-
-        const chain = classify(classifyText);
-
-        const entry = {
-          name: r["Name"] || r["Account"] || r["Location"] || r["Address"],
-          category: chain,
-          sub_channel: subChan,
-          address: r["Address"] || "",
-          city: r["City"] || "",
-          province: r["Province"] || r["Prov"] || "ON",
-          postal: r["Postal"] || r["Postal Code"] || "",
-          lat, lng
-        };
-
-        // Deduplicate by address key (last one wins)
-        uniqueByAddress.set(k, entry);
-      }
-    }
-
-    function plotData(){
-      const features = [];
-      const bounds = new mapboxgl.LngLatBounds();
-
-      for (const e of uniqueByAddress.values()){
-        features.push({
-          type: "Feature",
-          geometry: { type: "Point", coordinates: [e.lng, e.lat] },
-          properties: {
-            name: e.name,
-            address: e.address,
-            city: e.city,
-            province: e.province,
-            postal: e.postal,
-            category: e.category,
-            sub_channel: e.sub_channel
-          }
-        });
-        bounds.extend([e.lng, e.lat]);
-      }
-
-      const fc = { type:"FeatureCollection", features };
-      if (!map.getSource(MB_SOURCE)){
-        map.addSource(MB_SOURCE, { type:"geojson", data: fc, cluster:true, clusterMaxZoom:14, clusterRadius:50 });
-        addClusterLayers();
-      } else {
-        map.getSource(MB_SOURCE).setData(fc);
-      }
-
-      if (features.length > 0){
-        map.fitBounds(bounds, { padding:40, duration:0 });
-      }
-    }
-
-    function renderLegend(){
-      const el = document.getElementById("legend");
-      el.innerHTML = "<strong>Chains</strong>";
-      for (const [name, color] of Object.entries(GROUP_COLOR_MAP)){
-        const row = document.createElement("div");
-        row.className = "legend-row";
-        row.innerHTML = `<span class="legend-swatch" style="background:${color}"></span>${name}`;
-        el.appendChild(row);
-      }
-    }
-
-    async function boot(){
-      await ensureMap();
-      await Promise.all([loadMaster(), loadOrders()]);
-      processData();
-      plotData();
-      renderLegend();
-    }
-
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", boot, { once: true });
-    } else {
-      boot();
-    }
+    // Auto-run
+    init().catch(err => {
+      console.error(err);
+      alert('Failed to load master.xlsx/orders.xlsx. Ensure both are hosted next to this HTML (not via file://).');
+    });
   </script>
 </body>
 </html>
-
