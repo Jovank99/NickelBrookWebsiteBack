@@ -12,7 +12,7 @@
     mapboxgl.accessToken = "pk.eyJ1Ijoiam92YW5rOTkiLCJhIjoiY21lOHgzZHIyMGE3eDJrb2Z4azFsemdvcCJ9.Lh3hbX5_F3tGAe_mf0SKFA";
   </script>
 
-  <!-- XLSX for Excel parsing -->
+  <!-- XLSX for Excel/CSV parsing -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
   <style>
@@ -30,21 +30,30 @@
     // =========================
     // Config: two bundled files
     // =========================
-    const MASTER_URL = 'master.xlsx';  // place next to this HTML
-    const ORDERS_URL = 'orders.xlsx';  // place next to this HTML
+    const MASTER_URL = 'master.csv';   // CSV is fine
+    const ORDERS_URL = 'orders.xlsx';  // Orders as xlsx (can be csv too)
 
     // =========================
-    // Minimal helpers / normalization
+    // Helpers
     // =========================
     const pickNum = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
 
-    async function readFirstSheet(url){
+    async function readSheet(url){
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
       const buf = await res.arrayBuffer();
-      const wb = XLSX.read(buf, { type:'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      return XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const name = url.toLowerCase();
+
+      if (name.endsWith('.csv')) {
+        const text = new TextDecoder('utf-8').decode(buf);
+        const wb = XLSX.read(text, { type: 'string' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        return XLSX.utils.sheet_to_json(ws, { defval: '' });
+      } else {
+        const wb = XLSX.read(buf, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        return XLSX.utils.sheet_to_json(ws, { defval: '' });
+      }
     }
 
     function guessHeaders(headers){
@@ -61,38 +70,64 @@
       };
     }
 
+    // Flexible resolver for Master CSV/XLSX header variants
+    function resolveMasterCols(headers){
+      const H = headers.map(h => String(h||'').toLowerCase());
+      const find = (...needles) => headers.find((h,i)=> needles.some(n => H[i].includes(n)));
+      return {
+        loc:      find('location','store','account','name') || 'Location',
+        address:  find('address','street') || 'Address',
+        city:     find('city','town') || 'City/Town',
+        province: find('province','state','prov') || 'Province',
+        postal:   find('postal','postcode','zip') || 'Postal code',
+        lat:      find('lat','latitude') || 'Latitude',
+        lng:      find('lng','long','longitude') || 'Longitude',
+      };
+    }
+
     function escapeHtml(str){
       return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[s]));
     }
 
-    // Address canonicalization + keys (same strategy as your full app)
+    // Address normalization
     function canonProvince(s){ s = String(s||'').trim().toLowerCase().replace(/\./g,''); const map = { 'ontario':'on', 'on':'on', 'quebec':'qc', 'qc':'qc', 'british columbia':'bc', 'bc':'bc', 'alberta':'ab', 'ab':'ab' }; return map[s] || s; }
     function canonPostalCA(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
-    function canonStreet(s){ let x = String(s||'').toLowerCase().trim(); x = x.replace(/\b(unit|suite|ste|apt|apartment|#)\s*\w+\b/g,''); x = x.replace(/\b(fl|floor)\s*\d+\b/g,''); const reps = [[/street\b|st\./g,'st'], [/road\b|rd\./g,'rd'], [/avenue\b|ave\./g,'ave'], [/boulevard\b|blvd\./g,'blvd'], [/drive\b|dr\./g,'dr'], [/court\b|ct\./g,'ct'], [/crescent\b|cres\./g,'cres'], [/trail\b|trl\./g,'trl'], [/highway\b|hwy\./g,'hwy'], [/place\b|pl\./g,'pl'], [/terrace\b|terr\./g,'terr']]; reps.forEach(([re,to])=> x = x.replace(re,to)); x = x.replace(/[.,]/g,' '); x = x.replace(/\s+/g,' ').trim(); return x; }
+    function canonStreet(s){ let x = String(s||'').toLowerCase().trim();
+      x = x.replace(/\b(unit|suite|ste|apt|apartment|#)\s*\w+\b/g,'');
+      x = x.replace(/\b(fl|floor)\s*\d+\b/g,'');
+      const reps = [[/street\b|st\./g,'st'], [/road\b|rd\./g,'rd'], [/avenue\b|ave\./g,'ave'], [/boulevard\b|blvd\./g,'blvd'], [/drive\b|dr\./g,'dr'], [/court\b|ct\./g,'ct'], [/crescent\b|cres\./g,'cres'], [/trail\b|trl\./g,'trl'], [/highway\b|hwy\./g,'hwy'], [/place\b|pl\./g,'pl'], [/terrace\b|terr\./g,'terr']];
+      reps.forEach(([re,to])=> x = x.replace(re,to));
+      x = x.replace(/[.,]/g,' ');
+      x = x.replace(/\s+/g,' ').trim();
+      return x;
+    }
     function keyFull(addr, city, prov, postal){ return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov), canonPostalCA(postal)].filter(Boolean).join('|'); }
     function keyAddrPostal(addr, postal){ return [canonStreet(addr), canonPostalCA(postal)].filter(Boolean).join('|'); }
     function keyAddrCityProv(addr, city, prov){ return [canonStreet(addr), String(city||'').toLowerCase().trim(), canonProvince(prov)].filter(Boolean).join('|'); }
     function keyPostal(postal){ return canonPostalCA(postal); }
 
-    // =========================
-    // Master index (unique-only hits)
-    // =========================
+    // Master indices
     const MULTI = Symbol('multi');
     const masterIdx = { full:new Map(), addrPostal:new Map(), addrCityProv:new Map(), postal:new Map() };
-
     function setUnique(map, key, entry){ if (!key) return; const ex = map.get(key); if (!ex) map.set(key, entry); else if (ex !== entry) map.set(key, MULTI); }
 
     function ingestMasterRows(rows){
       masterIdx.full.clear(); masterIdx.addrPostal.clear(); masterIdx.addrCityProv.clear(); masterIdx.postal.clear();
+      if (!rows.length) return;
+      const headers = Object.keys(rows[0]);
+      const C = resolveMasterCols(headers);
+
       for (const r of rows){
-        const name    = String(r['Location'] ?? '').trim();
-        const address = String(r['Address'] ?? '').trim();
-        const city    = String(r['City/Town'] ?? '').trim();
-        const postal  = String(r['Postal code'] ?? '').trim();
-        const lat     = pickNum(r['Latitude']);
-        const lng     = pickNum(r['Longitude']);
+        const name    = String(r[C.loc] ?? '').trim();
+        const address = String(r[C.address] ?? '').trim();
+        const city    = String(r[C.city] ?? '').trim();
+        const postal  = String(r[C.postal] ?? '').trim();
+        const lat     = pickNum(r[C.lat]);
+        const lng     = pickNum(r[C.lng]);
         if (!address) continue;
-        const province = 'ON';
+        // If your Master has province column use it; else default
+        const province = String(r[C.province] ?? 'ON').trim() || 'ON';
+
         const entry = { name: name || address, address, city, province, postal, lat, lng };
         const kFull = keyFull(address, city, province, postal);
         const kAP   = keyAddrPostal(address, postal);
@@ -124,15 +159,15 @@
     let map;
 
     async function init(){
-      // 1) Map
+      // Map
       map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center:[-79.4,43.7], zoom:8 });
       map.addControl(new mapboxgl.NavigationControl(), 'top-right');
       await new Promise(res => map.on('load', res));
 
-      // 2) Load both files
+      // Load files (now using readSheet for both)
       const [masterRows, orderRows] = await Promise.all([
-        readFirstSheet(MASTER_URL),
-        readFirstSheet(ORDERS_URL)
+        readSheet(MASTER_URL),
+        readSheet(ORDERS_URL)
       ]);
       ingestMasterRows(masterRows);
 
@@ -166,7 +201,7 @@
           }
         }
 
-        if (lat==null || lng==null) continue; // still no coords → skip pin
+        if (lat==null || lng==null) continue; // still no coords → skip
 
         const name = String(r[cols.name]||'').trim();
         feats.push({ type:'Feature', geometry:{ type:'Point', coordinates:[lng,lat] }, properties:{ name, address, city, province, postal } });
@@ -201,7 +236,7 @@
     // Auto-run
     init().catch(err => {
       console.error(err);
-      alert('Failed to load master.xlsx/orders.xlsx. Ensure both are hosted next to this HTML (not via file://).');
+      alert('Failed to load master.csv and/or orders.xlsx. Ensure both are next to this HTML (not via file://).');
     });
   </script>
 </body>
